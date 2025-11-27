@@ -121,7 +121,7 @@ select:focus{border-color:rgba(76,195,255,.65); box-shadow:0 0 0 3px rgba(76,195
 
 /* === Fullscreen inside Grist iframe === */
 html, body { height: 100%; }
-body { overflow: hidden; }
+body { overflow: auto; }
 
 .app { height: 100%; min-height: 100%; }
 .content { flex: 1; display: flex; padding: 16px; }
