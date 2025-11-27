@@ -1,231 +1,136 @@
-/* =========================
-   Base
-========================= */
-html, body {
+:root{
+  --bg:#2c2c2c;
+  --panel:#343434;
+  --panel2:#3a3a3a;
+  --text:#f2f2f2;
+  --muted:#bdbdbd;
+  --border:#4a4a4a;
+  --accent:#4cc3ff;
+  --good:#76e39d;
+  --shadow:0 10px 30px rgba(0,0,0,.35);
+  --radius:14px;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+}
+
+.app{min-height:100%; display:flex; flex-direction:column}
+
+.topbar{
+  position:sticky; top:0; z-index:5;
+  background:linear-gradient(180deg, rgba(44,44,44,.98), rgba(44,44,44,.90));
+  border-bottom:1px solid var(--border);
+  backdrop-filter: blur(6px);
+  display:flex;
+  gap:16px;
+  align-items:flex-end;
+  padding:14px 16px;
+}
+
+.field{display:flex; flex-direction:column; gap:6px; min-width:260px}
+label{font-size:12px; color:var(--muted)}
+select{
+  background:var(--panel);
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:10px 12px;
+  outline:none;
+}
+select:focus{border-color:rgba(76,195,255,.65); box-shadow:0 0 0 3px rgba(76,195,255,.15)}
+
+.kpi{
+  margin-left:auto;
+  display:flex;
+  gap:12px;
+}
+.kpiItem{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:10px 12px;
+  min-width:150px;
+}
+.kpiLabel{font-size:11px; color:var(--muted); margin-bottom:6px}
+.kpiValue{font-size:14px; font-weight:650}
+
+.content{padding:16px; display:flex; justify-content:center}
+.card{
+  width:min(1100px, 100%);
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  padding:14px;
+}
+.cardTitle{font-size:14px; font-weight:700; margin-bottom:10px; color:var(--text)}
+
+.chartWrap{
+  position:relative;
+  width:100%;
+  height:420px;
+  background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+  border:1px solid var(--border);
+  border-radius:16px;
+  overflow:hidden;
+}
+#chart{width:100%; height:100%; display:block}
+
+.emptyState{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--muted);
+  font-size:14px;
+  pointer-events:none;
+  padding:20px;
+  text-align:center;
+}
+
+.tooltip{
+  position:absolute;
+  pointer-events:none;
+  background:rgba(20,20,20,.92);
+  border:1px solid rgba(255,255,255,.14);
+  padding:8px 10px;
+  border-radius:10px;
+  color:var(--text);
+  font-size:12px;
+  box-shadow:0 10px 22px rgba(0,0,0,.35);
+  max-width:240px;
+  transform: translate(10px, -10px);
+  white-space:nowrap;
+}
+
+.hint{
+  margin-top:10px;
+  font-size:12px;
+  color:var(--muted);
+}
+
+.kpiSingle{margin-left:auto}
+
+
+/* === Fullscreen inside Grist iframe === */
+html, body { height: 100%; }
+body { overflow: hidden; }
+
+.app { height: 100%; min-height: 100%; }
+.content { flex: 1; display: flex; padding: 16px; }
+.card {
+  width: 100%;
+  max-width: none;
   height: 100%;
-}
-
-body {
-  margin: 0;
-  padding: 0;
-  font-family: Arial, sans-serif;
-  background-color: #2c2c2c;
-  color: #f0f0f0;
-
-  /* IMPORTANT : évite l'impression "coupé en bas" */
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-
-/* =========================
-   Top bar (sticky)
-========================= */
-.sticky-container {
-  position: sticky;
-  top: 0;
-  background-color: #2c2c2c;
-  padding: 16px 18px;               /* un peu moins haut qu'avant */
-  display: flex;
-  gap: 18px;
-  align-items: flex-end;
-  z-index: 100;
-  border-bottom: 1px solid #3a3a3a;
-}
-
-.dropdown-container {
   display: flex;
   flex-direction: column;
 }
-
-label {
-  font-weight: bold;
-  margin-bottom: 8px;               /* un peu moins haut qu'avant */
-}
-
-select {
-  width: 240px;
-  padding: 8px;
-  background-color: #444;
-  color: #fff;
-  border: 1px solid #666;
-  border-radius: 4px;
-}
-
-.metrics {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: end;
-  margin-left: 8px;
-}
-
-.metric,
-.metricBox {
-  padding: 8px 10px;
-  border: 1px solid #444;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  min-width: 140px;
-}
-
-.metric .k,
-.metricKey {
-  font-size: 12px;
-  color: #cfcfcf;
-  margin-bottom: 2px;
-}
-
-.metric .v,
-.metricVal {
-  font-size: 16px;
-  font-weight: 700;
-  color: #fff;
-}
-
-.spacer {
-  flex: 1;
-}
-
-/* =========================
-   Content / Card
-========================= */
-.content {
-  padding: 14px 16px 26px;          /* + de padding en bas pour respirer */
-}
-
-.chart-card,
-.chartCard {
-  background: #ffffff;
-  color: #111;
-  border-radius: 14px;
-  padding: 14px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
-}
-
-.chart-title,
-.chartHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.h1,
-.chartTitle {
-  font-size: 16px;
-  font-weight: 800;
-  margin-bottom: 2px;
-}
-
-.small,
-.chartSub {
-  font-size: 12px;
-  color: #444;
-}
-
-.legend-pill,
-.pill {
-  font-size: 12px;
-  background: #f2f2f2;
-  border: 1px solid #ddd;
-  border-radius: 999px;
-  padding: 6px 10px;
-  white-space: nowrap;
-}
-
-/* =========================
-   Chart zone (un peu plus basse)
-========================= */
-.chart-wrap,
-.chartWrap {
-  position: relative;
-  height: 320px;                    /* 👈 réduit (avant ~380) */
-  border: 1px solid #eee;
-  border-radius: 12px;
-  padding: 10px;
-  background: #fff;
-}
-
-/* Si l'écran est petit, on réduit encore un peu */
-@media (max-height: 720px) {
-  .chart-wrap,
-  .chartWrap {
-    height: 280px;
-  }
-}
-
-#chart {
-  width: 100%;
-  height: 100%;
-}
-
-.empty {
-  position: absolute;
-  inset: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  font-weight: 700;
-  color: #444;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.03);
-}
-
-/* =========================
-   Month list
-========================= */
-.monthlist {
-  margin-top: 12px;
-  border-top: 1px dashed #ddd;
-  padding-top: 12px;
-}
-
-.monthlist-title {
-  font-weight: 800;
-  font-size: 13px;
-  margin-bottom: 8px;
-}
-
-.monthRows {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 8px;
-}
-
-.monthRow {
-  border: 1px solid #eee;
-  border-radius: 12px;
-  padding: 10px;
-  cursor: pointer;
-  user-select: none;
-  background: #fff;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
-}
-
-.monthRow:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.08);
-}
-
-.monthRow .m {
-  font-weight: 800;
-  font-size: 13px;
-}
-
-.monthRow .c {
-  margin-top: 2px;
-  font-size: 12px;
-  color: #444;
-}
-
-.monthRow[aria-disabled="true"] {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.monthRow.active {
-  border-color: #bbb;
-  background: #f8f8f8;
-}
+.chartWrap { flex: 1; height: auto; min-height: 220px; }
+#chart { width: 100%; height: 100%; }
