@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Références reçues par mois</title>
+
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="field">
+        <label for="firstColumnDropdown">Projet</label>
+        <select id="firstColumnDropdown">
+          <option value="">Selectionner un projet</option>
+        </select>
+      </div>
+
+      <div class="kpi kpiSingle" aria-live="polite">
+        <div class="kpiItem">
+          <div class="kpiLabel">Total reçus</div>
+          <div class="kpiValue" id="kpiTotal">—</div>
+        </div>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="card">
+        <div class="cardTitle" id="cardTitle">Réception par mois</div>
+
+        <div class="chartWrap" id="chartWrap">
+          <canvas id="chart" aria-label="Bar chart" role="img"></canvas>
+          <div class="emptyState" id="emptyState">Sélectionne un projet</div>
+          <div class="tooltip" id="tooltip" hidden></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="./js/legacy.js" defer></script>
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
