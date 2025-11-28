@@ -531,7 +531,7 @@ function renderDetailsForBucket(model, bucketKey, bucketLabel) {
                 <th>Référence</th>
                 <th>Indice</th>
                 <th>Reçu</th>
-                <th>Obs.</th>
+                <th>Observation</th>
               </tr>
             </thead>
             <tbody>
