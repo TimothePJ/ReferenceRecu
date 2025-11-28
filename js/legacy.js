@@ -4,10 +4,8 @@
     const dropdown = document.getElementById('firstColumnDropdown');
     if (!dropdown) return;
 
-    // Conserve la sélection actuelle
     const currentSelection = dropdown.value;
 
-    // Trier les valeurs par ordre alphabétique
     values.sort((a, b) => a.localeCompare(b));
 
     dropdown.innerHTML = '<option value="">Selectionner un projet</option>';
@@ -21,7 +19,6 @@
       }
     });
 
-    // Restaure la sélection précédente si elle est encore présente dans les options
     dropdown.value = currentSelection || '';
   }
 

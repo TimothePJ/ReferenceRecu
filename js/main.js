@@ -1,39 +1,41 @@
 const els = {
   dropdown: document.getElementById('firstColumnDropdown'),
-  granularity: document.getElementById('granularityDropdown'), // week/month/year
+  granularity: document.getElementById('granularityDropdown'),
+
   canvas: document.getElementById('chart'),
   chartWrap: document.getElementById('chartWrap'),
   empty: document.getElementById('emptyState'),
   tooltip: document.getElementById('tooltip'),
+
   kpiTotal: document.getElementById('kpiTotal'),
   cardTitle: document.getElementById('cardTitle'),
+
+  details: document.getElementById('details'),
+  detailsTitle: document.getElementById('detailsTitle'),
+  detailsList: document.getElementById('detailsList'),
 };
 
 const state = {
-  // Raw columns from Grist (columns format)
   cols: null,
   nRows: 0,
 
-  // Index built once per data refresh:
-  // projectLabel -> array of row indices (positions in columns arrays)
+  // project -> [rowIndex]
   projectIndex: new Map(),
 
-  // Current selection
+  // rowId -> rowIndex
+  rowIdToIndex: new Map(),
+
   selectedProject: "",
   selectedGranularity: "month",
 
-  // Cache computed per (project|granularity)
-  cache: new Map(), // key -> model
+  cache: new Map(),
 
-  // Cancellation tokens
   dataToken: 0,
   computeToken: 0,
 
-  // Render bookkeeping
-  bars: [], // [{x0,x1,y0,y1, key, count}]
+  bars: [],
 };
 
-// ---------- Utils
 const sleep0 = () => new Promise(r => setTimeout(r, 0));
 
 function normStr(v) {
@@ -50,7 +52,17 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-// ----- Encoded dates parsing (keepEncoded:true)
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;",
+  }[c]));
+}
+
+// Encoded dates parsing
 function parseMaybeDate(v) {
   if (!v) return null;
 
@@ -93,19 +105,18 @@ function parseMaybeDate(v) {
   return null;
 }
 
-// ---------- Bucketing (UTC)
-
 function startOfMonthUTC(d) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
 }
+
 function startOfYearUTC(d) {
   return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
 }
+
 function startOfWeekUTC(d) {
   const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  // Monday-based
-  const dow = (x.getUTCDay() + 6) % 7; // lun=0..dim=6
-  x.setUTCDate(x.getUTCDate() - dow);
+  const dow = (x.getUTCDay() + 6) % 7;
+  x.setUTCDate(x.getUTCDate() - dow); 
   return x;
 }
 
@@ -117,9 +128,11 @@ function addMonthsUTC(dateUTC, delta) {
   const nm = total % 12;
   return new Date(Date.UTC(ny, nm, 1));
 }
+
 function addYearsUTC(dateUTC, delta) {
   return new Date(Date.UTC(dateUTC.getUTCFullYear() + delta, 0, 1));
 }
+
 function addWeeksUTC(dateUTC, delta) {
   const x = new Date(dateUTC);
   x.setUTCDate(x.getUTCDate() + delta * 7);
@@ -133,9 +146,8 @@ function bucketStartUTC(d, gran) {
 }
 
 function isoWeekKeyFromWeekStart(weekStartUTC) {
-  // weekStartUTC is Monday 00:00 UTC
   const th = new Date(weekStartUTC);
-  th.setUTCDate(th.getUTCDate() + 3); // Thursday
+  th.setUTCDate(th.getUTCDate() + 3);
   const isoYear = th.getUTCFullYear();
 
   const jan4 = new Date(Date.UTC(isoYear, 0, 4));
@@ -152,7 +164,6 @@ function isoWeekKeyFromWeekStart(weekStartUTC) {
 function bucketKeyFromStart(startUTC, gran) {
   if (gran === "year") return String(startUTC.getUTCFullYear());
   if (gran === "week") return isoWeekKeyFromWeekStart(startUTC);
-  // month
   return `${startUTC.getUTCFullYear()}-${pad2(startUTC.getUTCMonth() + 1)}`;
 }
 
@@ -160,11 +171,9 @@ function bucketLabelFromStart(startUTC, gran) {
   if (gran === "year") return String(startUTC.getUTCFullYear());
 
   if (gran === "week") {
-    // Affiche la date du lundi de la semaine (ex: "24 octobre")
-    // Si tu veux toujours l'année: ajoute year:"numeric"
+    // libellé lisible au lieu de S01/S02...
     const nowY = new Date().getFullYear();
     const y = startUTC.getUTCFullYear();
-
     return startUTC.toLocaleDateString("fr-FR", {
       day: "2-digit",
       month: "long",
@@ -182,7 +191,11 @@ function nextBucketUTC(startUTC, gran, delta) {
   return addMonthsUTC(startUTC, delta);
 }
 
-// ---------- Grist integration
+function granularityLabel(g) {
+  if (g === "week") return "semaine";
+  if (g === "year") return "année";
+  return "mois";
+}
 
 function getCol(nameCandidates) {
   if (!state.cols) return null;
@@ -195,6 +208,7 @@ function getCol(nameCandidates) {
 function normalizeColumnsData(data) {
   if (!data) return null;
 
+  // rows format => convert
   if (Array.isArray(data)) {
     const cols = {};
     for (let i = 0; i < data.length; i++) {
@@ -255,6 +269,12 @@ async function buildProjectsListAndIndex(token) {
   }
 }
 
+function clearDetails() {
+  if (els.details) els.details.hidden = true;
+  if (els.detailsTitle) els.detailsTitle.textContent = "";
+  if (els.detailsList) els.detailsList.innerHTML = "";
+}
+
 function clearSelectionInGrist() {
   try {
     return grist.viewApi.setSelectedRows(null);
@@ -263,13 +283,6 @@ function clearSelectionInGrist() {
   }
 }
 
-function granularityLabel(g) {
-  if (g === "week") return "semaine";
-  if (g === "year") return "année";
-  return "mois";
-}
-
-// Key for cache
 function cacheKey(project, gran) {
   return `${project}|||${gran}`;
 }
@@ -284,6 +297,7 @@ async function computeAndRender(project, gran) {
     els.empty.textContent = "Selectionne un projet.";
     els.empty.hidden = false;
     drawEmpty();
+    clearDetails();
     await clearSelectionInGrist();
     return;
   }
@@ -293,6 +307,7 @@ async function computeAndRender(project, gran) {
   const cKey = cacheKey(project, gran);
   if (state.cache.has(cKey)) {
     renderModel(state.cache.get(cKey), gran);
+    clearDetails();
     return;
   }
 
@@ -301,10 +316,11 @@ async function computeAndRender(project, gran) {
   els.empty.hidden = true;
   drawEmpty();
   hideTooltip();
+  clearDetails();
 
   const colArchive = getCol(["Archive"]);
   const colRecu = getCol(["Recu", "RecuString"]);
-  const colRowId = getCol(["id", "ID", "Id"]); // usually 'id'
+  const colRowId = getCol(["id", "ID", "Id"]);
 
   if (!colRecu || !colRowId) {
     els.empty.textContent = "Colonnes manquantes. Affiche au minimum : NomProjetString, Recu (ou RecuString), Archive.";
@@ -362,7 +378,7 @@ async function computeAndRender(project, gran) {
     return;
   }
 
-  // Expand -2 .. +2 (then hide first 2 and last 2)
+  // Expand -2 .. +2 then hide first 2 + last 2 (pour enlever les 0 inutiles)
   const startRange = nextBucketUTC(minStart, gran, -2);
   const endRange = nextBucketUTC(maxStart, gran, +2);
 
@@ -381,7 +397,6 @@ async function computeAndRender(project, gran) {
     if (safety % 400 === 0) await sleep0();
   }
 
-  // Hide padding
   let keys = allKeys, labels = allLabels, countsArr = allCounts;
   if (allKeys.length > 4) {
     keys = allKeys.slice(2, -2);
@@ -402,15 +417,20 @@ function onGristRecords(data) {
   if (!cols) return;
 
   state.cols = cols;
-  state.nRows = (getCol(["id", "ID", "Id"]) || []).length || 0;
 
-  // Data changed => reset caches/index
+  // rowId->index map (fast details rendering)
+  state.rowIdToIndex = new Map();
+  const colRowId = getCol(["id", "ID", "Id"]) || [];
+  for (let i = 0; i < colRowId.length; i++) state.rowIdToIndex.set(colRowId[i], i);
+
+  state.nRows = colRowId.length || 0;
+
   state.cache.clear();
   state.projectIndex.clear();
+  clearDetails();
 
   buildProjectsListAndIndex(token);
 
-  // Keep current selection rendered if possible
   if (state.selectedProject) {
     computeAndRender(state.selectedProject, state.selectedGranularity);
   } else {
@@ -431,7 +451,113 @@ function initGrist() {
   });
 }
 
-// ---------- Chart rendering (lightweight canvas)
+function renderDetailsForBucket(model, bucketKey, bucketLabel) {
+  if (!els.details || !els.detailsList || !els.detailsTitle) return;
+
+  const ids = model.rowIdsByKey.get(bucketKey) || [];
+  if (!ids.length) {
+    clearDetails();
+    return;
+  }
+
+  const colDoc = getCol(["NomDocument"]);
+  const colEm = getCol(["Emetteur"]);
+  const colRef = getCol(["Reference"]);
+  const colInd = getCol(["Indice"]);
+  const colRecu = getCol(["Recu", "RecuString"]);
+  const colObs = getCol(["DescriptionObservations"]);
+
+  const formatDateFR = (d) => d
+    ? d.toLocaleDateString("fr-FR", { day: "2-digit", month: "long", year: "numeric" })
+    : "-";
+
+  // Group by NomDocument
+  const groups = new Map(); // docName -> rows[]
+  const MAX = 600; // sécurité perf si énorme
+  const slice = ids.slice(0, MAX);
+
+  for (const rowId of slice) {
+    const i = state.rowIdToIndex.get(rowId);
+    if (i == null) continue;
+
+    const doc = normStr(colDoc?.[i]) || "Sans document";
+    const em = normStr(colEm?.[i]) || "-";
+    const ref = normStr(colRef?.[i]) || "-";
+    const ind = normStr(colInd?.[i]) || "-";
+    const d = parseMaybeDate(colRecu?.[i]);
+    const recuTxt = formatDateFR(d);
+    const obs = normStr(colObs?.[i]) || "-";
+
+    if (!groups.has(doc)) groups.set(doc, []);
+    groups.get(doc).push({
+      rowId,
+      em, ref, ind,
+      recuMs: d ? d.getTime() : 0,
+      recuTxt,
+      obs
+    });
+  }
+
+  // Sort docs alphabetically, rows by date desc then emetteur
+  const docNames = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b, "fr"));
+  for (const doc of docNames) {
+    groups.get(doc).sort((a, b) => (b.recuMs - a.recuMs) || a.em.localeCompare(b.em, "fr"));
+  }
+
+  els.detailsTitle.textContent = `${bucketLabel} — ${ids.length} reçu(s)`;
+  els.details.hidden = false;
+
+  // Render grouped tables
+  els.detailsList.innerHTML = docNames.map(doc => {
+    const rows = groups.get(doc);
+    return `
+      <div class="docGroup">
+        <div class="docTitle">
+          <span class="docName">${escapeHtml(doc)}</span>
+        </div>
+
+        <div class="tableWrap">
+          <table class="miniTable">
+            <colgroup>
+              <col class="cEm">
+              <col class="cRef">
+              <col class="cInd">
+              <col class="cRecu">
+              <col class="cObs">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Émetteur</th>
+                <th>Référence</th>
+                <th>Indice</th>
+                <th>Reçu</th>
+                <th>Obs.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr>
+                  <td>${escapeHtml(r.em)}</td>
+                  <td class="tdRef">${escapeHtml(r.ref)}</td>
+                  <td>${escapeHtml(r.ind)}</td>
+                  <td>${escapeHtml(r.recuTxt)}</td>
+                  <td class="tdObs">${escapeHtml(r.obs)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  if (ids.length > MAX) {
+    els.detailsList.insertAdjacentHTML(
+      "beforeend",
+      `<div class="detailsSub">… ${ids.length - MAX} lignes non affichées (limite ${MAX})</div>`
+    );
+  }
+}
 
 function drawEmpty() {
   const ctx = els.canvas.getContext("2d");
@@ -464,6 +590,7 @@ function renderModel(model, gran) {
     els.empty.textContent = "Aucun reçu (hors archives) pour ce projet.";
     els.empty.hidden = false;
     drawEmpty();
+    clearDetails();
     return;
   }
 
@@ -505,7 +632,7 @@ function drawBars(labels, counts, keys) {
   ctx.strokeStyle = grid;
   ctx.lineWidth = Math.max(1, Math.floor(1 * dpr));
 
-  // Grid + y labels
+  // grid + y labels
   for (let v = 0; v <= maxVal; v += tickStep) {
     const t = v / maxVal;
     const y = padT + (1 - t) * plotH;
@@ -520,6 +647,7 @@ function drawBars(labels, counts, keys) {
     ctx.fillText(String(v), padL - Math.floor(10 * dpr), y);
   }
 
+  // bars
   const n = labels.length;
   const gap = Math.max(2 * dpr, Math.min(10 * dpr, plotW / (n * 6)));
   const barW = Math.max(3 * dpr, (plotW - gap * (n - 1)) / n);
@@ -541,7 +669,7 @@ function drawBars(labels, counts, keys) {
     state.bars.push({ x0, x1, y0, y1, key: keys[i], count: c, label: labels[i] });
   }
 
-  // X labels (auto skip)
+  // x labels (auto skip)
   ctx.fillStyle = text;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -571,8 +699,6 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
 }
-
-// ---------- Interactions
 
 function getBarAtClientPos(clientX, clientY) {
   const rect = els.canvas.getBoundingClientRect();
@@ -616,10 +742,8 @@ async function selectBucketInGrist(bucketKey) {
   }
 }
 
-// ---------- Boot
-
 function attachEvents() {
-  // Ensure default granularity
+  // Default granularity
   if (els.granularity) {
     const v = normStr(els.granularity.value) || "month";
     state.selectedGranularity = (v === "week" || v === "year" || v === "month") ? v : "month";
@@ -630,39 +754,45 @@ function attachEvents() {
       state.selectedGranularity = (g === "week" || g === "year" || g === "month") ? g : "month";
       state.computeToken++;
       hideTooltip();
+      clearDetails();
       clearSelectionInGrist();
       if (state.selectedProject) computeAndRender(state.selectedProject, state.selectedGranularity);
       else renderModel({ project: "", keys: [], labels: [], counts: [], rowIdsByKey: new Map(), total: 0 }, state.selectedGranularity);
     });
   }
 
-  // Projet change
+  // Project change
   els.dropdown.addEventListener("change", () => {
     const p = normStr(els.dropdown.value);
     state.computeToken++;
     hideTooltip();
+    clearDetails();
     clearSelectionInGrist();
     computeAndRender(p, state.selectedGranularity);
   });
 
-  // Canvas interactions
+  // Hover tooltip
   els.canvas.addEventListener("mousemove", (e) => {
     const b = getBarAtClientPos(e.clientX, e.clientY);
     if (!b || b.count <= 0) return hideTooltip();
     showTooltip(b, e.clientX, e.clientY);
   });
   els.canvas.addEventListener("mouseleave", hideTooltip);
+
+  // Click: select rows + show details
   els.canvas.addEventListener("click", async (e) => {
     const b = getBarAtClientPos(e.clientX, e.clientY);
     if (!b || b.count <= 0) return;
+
     await selectBucketInGrist(b.key);
+
+    const model = state.cache.get(cacheKey(state.selectedProject, state.selectedGranularity));
+    if (model) renderDetailsForBucket(model, b.key, b.label);
   });
 
-  // Responsive
+  // Responsive redraw
   window.addEventListener("resize", () => {
-    const project = state.selectedProject;
-    const gran = state.selectedGranularity;
-    const model = state.cache.get(cacheKey(project, gran));
+    const model = state.cache.get(cacheKey(state.selectedProject, state.selectedGranularity));
     if (model) drawBars(model.labels, model.counts, model.keys);
     else drawEmpty();
   });

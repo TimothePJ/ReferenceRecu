@@ -19,7 +19,6 @@
         </select>
       </div>
 
-      <!-- ✅ Chronologie DOIT être en haut (pas dans le chart) -->
       <div class="field">
         <label for="granularityDropdown">Chronologie</label>
         <select id="granularityDropdown">
@@ -45,6 +44,11 @@
           <canvas id="chart" aria-label="Bar chart" role="img"></canvas>
           <div class="emptyState" id="emptyState">Sélectionne un projet</div>
           <div class="tooltip" id="tooltip" hidden></div>
+        </div>
+
+        <div class="details" id="details" hidden>
+          <div class="detailsTitle" id="detailsTitle">Détails</div>
+          <div class="detailsList" id="detailsList"></div>
         </div>
 
         <!-- (optionnel) tu peux ajouter ici une zone "hint" ou une liste si tu veux -->
