@@ -1,12 +1,6 @@
-/* ReferenceRecu - ultra fast version
-   Goals:
-   - Dropdown is populated like your other widgets (populateFirstColumnDropdown).
-   - Performance: avoid decoding refs/dates, fetch only "shown" columns, compute per-project lazily with cancellation + chunking.
-   - No reset button, no period selector, no extra "0 months" at ends.
-*/
-
 const els = {
   dropdown: document.getElementById('firstColumnDropdown'),
+  granularity: document.getElementById('granularityDropdown'), // week/month/year
   canvas: document.getElementById('chart'),
   chartWrap: document.getElementById('chartWrap'),
   empty: document.getElementById('emptyState'),
@@ -20,11 +14,16 @@ const state = {
   cols: null,
   nRows: 0,
 
+  // Index built once per data refresh:
+  // projectLabel -> array of row indices (positions in columns arrays)
+  projectIndex: new Map(),
+
   // Current selection
   selectedProject: "",
+  selectedGranularity: "month",
 
-  // Cache computed per project
-  cache: new Map(), // project -> {months:[], counts:[], rowIdsByMonth: Map, total:number, firstKey, lastKey}
+  // Cache computed per (project|granularity)
+  cache: new Map(), // key -> model
 
   // Cancellation tokens
   dataToken: 0,
@@ -51,26 +50,18 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-function monthKeyFromUTCDate(d) {
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}`;
-}
-
+// ----- Encoded dates parsing (keepEncoded:true)
 function parseMaybeDate(v) {
-  // We mostly get raw encoded cell values (keepEncoded: true).
-  // DateTimes are ["D", timestampSeconds, "UTC"] ; dates are ["d", timestampSeconds].
-  // See GristData.CellValue docs.
   if (!v) return null;
 
-  // Already a Date (if keepEncoded was false somewhere)
   if (v instanceof Date && !isNaN(v.getTime())) return v;
 
-  // Moment-like
   if (typeof v === "object" && v && typeof v.toDate === "function") {
     const d = v.toDate();
     return (d instanceof Date && !isNaN(d.getTime())) ? d : null;
   }
 
-  // Encoded date/datetime
+  // Encoded date/datetime: ["D", seconds] / ["d", seconds]
   if (Array.isArray(v)) {
     const code = v[0];
     if ((code === "D" || code === "d") && typeof v[1] === "number") {
@@ -81,12 +72,11 @@ function parseMaybeDate(v) {
     return null;
   }
 
-  // String (ISO or FR dd/mm/yyyy)
   if (typeof v === "string") {
     const s = v.trim();
     if (!s || s === "-" || s.startsWith("1900-01-01")) return null;
 
-    // dd/mm/yyyy (RecuString)
+    // dd/mm/yyyy
     const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
     if (m) {
       const dd = Number(m[1]);
@@ -96,7 +86,6 @@ function parseMaybeDate(v) {
       return isNaN(d.getTime()) ? null : d;
     }
 
-    // ISO-ish
     const d = new Date(s);
     return isNaN(d.getTime()) ? null : d;
   }
@@ -104,41 +93,93 @@ function parseMaybeDate(v) {
   return null;
 }
 
-function parseMonthKey(key) {
-  const m = /^(\d{4})-(\d{2})$/.exec(key);
-  if (!m) return {y: 1970, m: 1};
-  return { y: Number(m[1]), m: Number(m[2]) };
+// ---------- Bucketing (UTC)
+
+function startOfMonthUTC(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+function startOfYearUTC(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+}
+function startOfWeekUTC(d) {
+  const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  // Monday-based
+  const dow = (x.getUTCDay() + 6) % 7; // lun=0..dim=6
+  x.setUTCDate(x.getUTCDate() - dow);
+  return x;
 }
 
-function monthKeyAdd(key, deltaMonths) {
-  const {y, m} = parseMonthKey(key);
-  let total = y * 12 + (m - 1) + deltaMonths;
+function addMonthsUTC(dateUTC, delta) {
+  const y = dateUTC.getUTCFullYear();
+  const m = dateUTC.getUTCMonth();
+  const total = y * 12 + m + delta;
   const ny = Math.floor(total / 12);
-  const nm = (total % 12) + 1;
-  return `${ny}-${pad2(nm)}`;
+  const nm = total % 12;
+  return new Date(Date.UTC(ny, nm, 1));
+}
+function addYearsUTC(dateUTC, delta) {
+  return new Date(Date.UTC(dateUTC.getUTCFullYear() + delta, 0, 1));
+}
+function addWeeksUTC(dateUTC, delta) {
+  const x = new Date(dateUTC);
+  x.setUTCDate(x.getUTCDate() + delta * 7);
+  return x;
 }
 
-function monthKeyCompare(a, b) {
-  return a === b ? 0 : (a < b ? -1 : 1);
+function bucketStartUTC(d, gran) {
+  if (gran === "year") return startOfYearUTC(d);
+  if (gran === "week") return startOfWeekUTC(d);
+  return startOfMonthUTC(d);
 }
 
-function makeMonthRange(firstKey, lastKey) {
-  if (!firstKey || !lastKey) return [];
-  if (monthKeyCompare(firstKey, lastKey) > 0) return [];
-  const out = [];
-  let k = firstKey;
-  out.push(k);
-  while (k !== lastKey && out.length < 2400) { // safety
-    k = monthKeyAdd(k, 1);
-    out.push(k);
+function isoWeekKeyFromWeekStart(weekStartUTC) {
+  // weekStartUTC is Monday 00:00 UTC
+  const th = new Date(weekStartUTC);
+  th.setUTCDate(th.getUTCDate() + 3); // Thursday
+  const isoYear = th.getUTCFullYear();
+
+  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const jan4Dow = (jan4.getUTCDay() + 6) % 7;
+  const week1Mon = new Date(jan4);
+  week1Mon.setUTCDate(jan4.getUTCDate() - jan4Dow);
+
+  const diff = Math.round((weekStartUTC - week1Mon) / (7 * 24 * 3600 * 1000));
+  const weekNo = diff + 1;
+
+  return `${isoYear}-W${String(weekNo).padStart(2, "0")}`;
+}
+
+function bucketKeyFromStart(startUTC, gran) {
+  if (gran === "year") return String(startUTC.getUTCFullYear());
+  if (gran === "week") return isoWeekKeyFromWeekStart(startUTC);
+  // month
+  return `${startUTC.getUTCFullYear()}-${pad2(startUTC.getUTCMonth() + 1)}`;
+}
+
+function bucketLabelFromStart(startUTC, gran) {
+  if (gran === "year") return String(startUTC.getUTCFullYear());
+
+  if (gran === "week") {
+    // Affiche la date du lundi de la semaine (ex: "24 octobre")
+    // Si tu veux toujours l'année: ajoute year:"numeric"
+    const nowY = new Date().getFullYear();
+    const y = startUTC.getUTCFullYear();
+
+    return startUTC.toLocaleDateString("fr-FR", {
+      day: "2-digit",
+      month: "long",
+      ...(y !== nowY ? { year: "numeric" } : {})
+    });
   }
-  return out;
+
+  // month
+  return startUTC.toLocaleDateString("fr-FR", { month: "short", year: "numeric" });
 }
 
-function formatMonthFR(yyyyMM) {
-  const {y, m} = parseMonthKey(yyyyMM);
-  const d = new Date(Date.UTC(y, m - 1, 1));
-  return d.toLocaleDateString("fr-FR", { month: "short", year: "numeric" });
+function nextBucketUTC(startUTC, gran, delta) {
+  if (gran === "year") return addYearsUTC(startUTC, delta);
+  if (gran === "week") return addWeeksUTC(startUTC, delta);
+  return addMonthsUTC(startUTC, delta);
 }
 
 // ---------- Grist integration
@@ -152,12 +193,9 @@ function getCol(nameCandidates) {
 }
 
 function normalizeColumnsData(data) {
-  // Expected: format:"columns" => object with keys -> arrays
-  // Also accept rows format and convert if needed.
   if (!data) return null;
 
   if (Array.isArray(data)) {
-    // rows format: [{id: 1, ColA: ...}, ...]
     const cols = {};
     for (let i = 0; i < data.length; i++) {
       const row = data[i] || {};
@@ -169,32 +207,39 @@ function normalizeColumnsData(data) {
     return cols;
   }
 
-  // columns format
   if (typeof data === "object") return data;
-
   return null;
 }
 
-async function buildProjectsList(token) {
+async function buildProjectsListAndIndex(token) {
   const colProj = getCol(["NomProjetString", "NomProjet"]);
   if (!colProj) return;
 
   const uniq = new Set();
+  const index = new Map();
   const n = colProj.length || 0;
 
-  // Chunk to keep UI responsive.
   for (let i = 0; i < n; i++) {
     if (token !== state.dataToken) return;
     const p = normStr(colProj[i]);
-    if (p) uniq.add(p);
-    if (i % 8000 === 0) await sleep0();
+    if (p) {
+      uniq.add(p);
+      let arr = index.get(p);
+      if (!arr) {
+        arr = [];
+        index.set(p, arr);
+      }
+      arr.push(i);
+    }
+    if (i % 12000 === 0) await sleep0();
   }
+
+  state.projectIndex = index;
 
   const values = Array.from(uniq);
   if (typeof window.populateFirstColumnDropdown === "function") {
     window.populateFirstColumnDropdown(values);
   } else {
-    // Fallback
     els.dropdown.innerHTML = '<option value="">Selectionner un projet</option>';
     values.sort((a, b) => a.localeCompare(b));
     for (const v of values) {
@@ -205,7 +250,6 @@ async function buildProjectsList(token) {
     }
   }
 
-  // Restore selection (if any)
   if (state.selectedProject && values.includes(state.selectedProject)) {
     els.dropdown.value = state.selectedProject;
   }
@@ -219,12 +263,26 @@ function clearSelectionInGrist() {
   }
 }
 
-async function computeAndRender(project) {
+function granularityLabel(g) {
+  if (g === "week") return "semaine";
+  if (g === "year") return "année";
+  return "mois";
+}
+
+// Key for cache
+function cacheKey(project, gran) {
+  return `${project}|||${gran}`;
+}
+
+async function computeAndRender(project, gran) {
+  gran = gran || state.selectedGranularity || "month";
+
   if (!project) {
     state.selectedProject = "";
-    els.empty.hidden = false;
     els.kpiTotal.textContent = "—";
-    els.cardTitle.textContent = "Réception par mois";
+    els.cardTitle.textContent = `Réception par ${granularityLabel(gran)}`;
+    els.empty.textContent = "Selectionne un projet.";
+    els.empty.hidden = false;
     drawEmpty();
     await clearSelectionInGrist();
     return;
@@ -232,94 +290,108 @@ async function computeAndRender(project) {
 
   state.selectedProject = project;
 
-  // Cache hit
-  if (state.cache.has(project)) {
-    const model = state.cache.get(project);
-    renderModel(model);
+  const cKey = cacheKey(project, gran);
+  if (state.cache.has(cKey)) {
+    renderModel(state.cache.get(cKey), gran);
     return;
   }
 
-  // Compute
   const token = ++state.computeToken;
   els.empty.textContent = "";
   els.empty.hidden = true;
   drawEmpty();
+  hideTooltip();
 
-  const colProj = getCol(["NomProjetString", "NomProjet"]);
   const colArchive = getCol(["Archive"]);
   const colRecu = getCol(["Recu", "RecuString"]);
   const colRowId = getCol(["id", "ID", "Id"]); // usually 'id'
 
-  if (!colProj || !colRecu || !colRowId) {
-    els.empty.textContent = "Colonnes manquantes. Dans le panneau de droite, affiche au minimum : NomProjetString, Recu, Archive.";
+  if (!colRecu || !colRowId) {
+    els.empty.textContent = "Colonnes manquantes. Affiche au minimum : NomProjetString, Recu (ou RecuString), Archive.";
+    els.empty.hidden = false;
     return;
   }
 
-  const n = colRowId.length || 0;
-  const counts = new Map();       // yyyy-MM -> count
-  const rowIdsByMonth = new Map(); // yyyy-MM -> [rowIds]
-  let firstKey = null;
-  let lastKey = null;
+  const idxs = state.projectIndex.get(project) || [];
+  const counts = new Map();        // bucketKey -> count
+  const rowIdsByKey = new Map();   // bucketKey -> [rowIds]
+  let minStart = null;
+  let maxStart = null;
   let total = 0;
 
-  for (let i = 0; i < n; i++) {
+  for (let j = 0; j < idxs.length; j++) {
     if (token !== state.computeToken) return;
-
-    const p = normStr(colProj[i]);
-    if (p !== project) {
-      if (i % 12000 === 0) await sleep0();
-      continue;
-    }
+    const i = idxs[j];
 
     if (colArchive && safeBool(colArchive[i])) {
-      if (i % 12000 === 0) await sleep0();
+      if (j % 12000 === 0) await sleep0();
       continue;
     }
 
     const d = parseMaybeDate(colRecu[i]);
-    if (!d) {
-      if (i % 12000 === 0) await sleep0();
+    if (!d || d.getUTCFullYear() === 1900) {
+      if (j % 12000 === 0) await sleep0();
       continue;
     }
 
-    // Ignore "fake" 1900 dates, if they come through
-    if (d.getUTCFullYear() === 1900) {
-      if (i % 12000 === 0) await sleep0();
-      continue;
-    }
+    const start = bucketStartUTC(d, gran);
+    const key = bucketKeyFromStart(start, gran);
 
-    const key = monthKeyFromUTCDate(d);
     total++;
-
     counts.set(key, (counts.get(key) || 0) + 1);
-    let arr = rowIdsByMonth.get(key);
+
+    let arr = rowIdsByKey.get(key);
     if (!arr) {
       arr = [];
-      rowIdsByMonth.set(key, arr);
+      rowIdsByKey.set(key, arr);
     }
     arr.push(colRowId[i]);
 
-    if (!firstKey || monthKeyCompare(key, firstKey) < 0) firstKey = key;
-    if (!lastKey || monthKeyCompare(key, lastKey) > 0) lastKey = key;
+    if (!minStart || start.getTime() < minStart.getTime()) minStart = start;
+    if (!maxStart || start.getTime() > maxStart.getTime()) maxStart = start;
 
-    if (i % 12000 === 0) await sleep0();
+    if (j % 12000 === 0) await sleep0();
   }
 
   if (token !== state.computeToken) return;
 
-  if (!firstKey || !lastKey || total === 0) {
-    const model = { project, months: [], counts: [], rowIdsByMonth, total: 0, firstKey: null, lastKey: null };
-    state.cache.set(project, model);
-    renderModel(model);
+  if (!minStart || !maxStart || total === 0) {
+    const model = { project, keys: [], labels: [], counts: [], rowIdsByKey, total: 0 };
+    state.cache.set(cKey, model);
+    renderModel(model, gran);
     return;
   }
 
-  const months = makeMonthRange(firstKey, lastKey);
-  const countsArr = months.map(k => counts.get(k) || 0);
+  // Expand -2 .. +2 (then hide first 2 and last 2)
+  const startRange = nextBucketUTC(minStart, gran, -2);
+  const endRange = nextBucketUTC(maxStart, gran, +2);
 
-  const model = { project, months, counts: countsArr, rowIdsByMonth, total, firstKey, lastKey };
-  state.cache.set(project, model);
-  renderModel(model);
+  const allKeys = [];
+  const allLabels = [];
+  const allCounts = [];
+
+  let cur = startRange;
+  let safety = 0;
+  while (cur.getTime() <= endRange.getTime() && safety++ < 5000) {
+    const k = bucketKeyFromStart(cur, gran);
+    allKeys.push(k);
+    allLabels.push(bucketLabelFromStart(cur, gran));
+    allCounts.push(counts.get(k) || 0);
+    cur = nextBucketUTC(cur, gran, +1);
+    if (safety % 400 === 0) await sleep0();
+  }
+
+  // Hide padding
+  let keys = allKeys, labels = allLabels, countsArr = allCounts;
+  if (allKeys.length > 4) {
+    keys = allKeys.slice(2, -2);
+    labels = allLabels.slice(2, -2);
+    countsArr = allCounts.slice(2, -2);
+  }
+
+  const model = { project, keys, labels, counts: countsArr, rowIdsByKey, total };
+  state.cache.set(cKey, model);
+  renderModel(model, gran);
 }
 
 function onGristRecords(data) {
@@ -331,31 +403,26 @@ function onGristRecords(data) {
 
   state.cols = cols;
   state.nRows = (getCol(["id", "ID", "Id"]) || []).length || 0;
-  state.cache.clear();
 
-  // Build dropdown like your other widgets
-  buildProjectsList(token);
+  // Data changed => reset caches/index
+  state.cache.clear();
+  state.projectIndex.clear();
+
+  buildProjectsListAndIndex(token);
 
   // Keep current selection rendered if possible
-  const selected = state.selectedProject;
-  if (selected) {
-    // Recompute (cache cleared)
-    computeAndRender(selected);
+  if (state.selectedProject) {
+    computeAndRender(state.selectedProject, state.selectedGranularity);
   } else {
     drawEmpty();
+    els.empty.textContent = "Selectionne un projet.";
+    els.empty.hidden = false;
   }
 }
 
 function initGrist() {
-  grist.ready({
-    requiredAccess: "read table",
-  });
+  grist.ready({ requiredAccess: "read table" });
 
-  // Important performance knobs:
-  // - format:"columns" avoids building row objects.
-  // - includeColumns:"shown" lets you aggressively hide columns in the creator panel.
-  // - keepEncoded:true avoids moment conversions for dates.
-  // - expandRefs:false avoids expanding reference columns into objects.
   grist.onRecords(onGristRecords, {
     format: "columns",
     includeColumns: "shown",
@@ -386,10 +453,13 @@ function resizeCanvasToDisplaySize() {
   return dpr;
 }
 
-function renderModel(model) {
-  els.cardTitle.textContent = model.project ? `Réception par mois — ${model.project}` : "Réception par mois";
+function renderModel(model, gran) {
+  const gLabel = granularityLabel(gran);
+  els.cardTitle.textContent = model.project
+    ? `Réception par ${gLabel} — ${model.project}`
+    : `Réception par ${gLabel}`;
 
-  if (!model.months || model.months.length === 0) {
+  if (!model.keys || model.keys.length === 0) {
     els.kpiTotal.textContent = "0";
     els.empty.textContent = "Aucun reçu (hors archives) pour ce projet.";
     els.empty.hidden = false;
@@ -399,10 +469,10 @@ function renderModel(model) {
 
   els.kpiTotal.textContent = String(model.total);
   els.empty.hidden = true;
-  drawBars(model.months, model.counts);
+  drawBars(model.labels, model.counts, model.keys);
 }
 
-function drawBars(monthKeys, counts) {
+function drawBars(labels, counts, keys) {
   const ctx = els.canvas.getContext("2d");
   if (!ctx) return;
 
@@ -412,11 +482,10 @@ function drawBars(monthKeys, counts) {
 
   ctx.clearRect(0, 0, W, H);
 
-  // Layout
   const padL = Math.floor(54 * dpr);
   const padR = Math.floor(16 * dpr);
   const padT = Math.floor(18 * dpr);
-  const padB = Math.floor(52 * dpr);
+  const padB = Math.floor(60 * dpr);
 
   const plotW = Math.max(10, W - padL - padR);
   const plotH = Math.max(10, H - padT - padB);
@@ -425,7 +494,6 @@ function drawBars(monthKeys, counts) {
   const yTicks = Math.min(5, maxVal);
   const tickStep = Math.max(1, Math.ceil(maxVal / yTicks));
 
-  // Colors (derived from CSS vars, but canvas needs actual values)
   const css = getComputedStyle(document.documentElement);
   const grid = css.getPropertyValue("--border").trim() || "#4a4a4a";
   const text = css.getPropertyValue("--muted").trim() || "#bdbdbd";
@@ -448,13 +516,11 @@ function drawBars(monthKeys, counts) {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    const label = String(v);
     ctx.textAlign = "right";
-    ctx.fillText(label, padL - Math.floor(10 * dpr), y);
+    ctx.fillText(String(v), padL - Math.floor(10 * dpr), y);
   }
 
-  // Bars
-  const n = monthKeys.length;
+  const n = labels.length;
   const gap = Math.max(2 * dpr, Math.min(10 * dpr, plotW / (n * 6)));
   const barW = Math.max(3 * dpr, (plotW - gap * (n - 1)) / n);
 
@@ -467,31 +533,29 @@ function drawBars(monthKeys, counts) {
     const y1 = padT + plotH;
     const y0 = y1 - h;
 
-    // bar
     ctx.fillStyle = bar;
     const r = Math.min(6 * dpr, barW / 2, h);
     roundRect(ctx, x0, y0, barW, h, r);
     ctx.fill();
 
-    state.bars.push({ x0, x1, y0, y1, key: monthKeys[i], count: c });
+    state.bars.push({ x0, x1, y0, y1, key: keys[i], count: c, label: labels[i] });
   }
 
   // X labels (auto skip)
   ctx.fillStyle = text;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  const maxLabels = Math.floor(plotW / (70 * dpr));
+
+  const maxLabels = Math.floor(plotW / (78 * dpr));
   const step = Math.max(1, Math.ceil(n / Math.max(1, maxLabels)));
 
   for (let i = 0; i < n; i += step) {
-    const label = formatMonthFR(monthKeys[i]);
     const x = padL + i * (barW + gap) + barW / 2;
     const y = padT + plotH + Math.floor(10 * dpr);
     ctx.save();
     ctx.translate(x, y);
-    // Slight tilt if crowded
     if (step > 1) ctx.rotate(-0.35);
-    ctx.fillText(label, 0, 0);
+    ctx.fillText(labels[i], 0, 0);
     ctx.restore();
   }
 }
@@ -523,8 +587,7 @@ function getBarAtClientPos(clientX, clientY) {
 
 function showTooltip(bar, clientX, clientY) {
   if (!bar || !els.tooltip) return;
-  const label = formatMonthFR(bar.key);
-  els.tooltip.textContent = `${label} : ${bar.count}`;
+  els.tooltip.textContent = `${bar.label} : ${bar.count}`;
   els.tooltip.hidden = false;
 
   const wrapRect = els.chartWrap.getBoundingClientRect();
@@ -539,10 +602,13 @@ function hideTooltip() {
   els.tooltip.hidden = true;
 }
 
-async function selectMonthInGrist(monthKey) {
-  const model = state.cache.get(state.selectedProject);
+async function selectBucketInGrist(bucketKey) {
+  const project = state.selectedProject;
+  const gran = state.selectedGranularity;
+  const model = state.cache.get(cacheKey(project, gran));
   if (!model) return;
-  const rowIds = model.rowIdsByMonth.get(monthKey) || [];
+
+  const rowIds = model.rowIdsByKey.get(bucketKey) || [];
   try {
     await grist.viewApi.setSelectedRows(rowIds.length ? rowIds : null);
   } catch {
@@ -553,13 +619,30 @@ async function selectMonthInGrist(monthKey) {
 // ---------- Boot
 
 function attachEvents() {
-  // Dropdown change
+  // Ensure default granularity
+  if (els.granularity) {
+    const v = normStr(els.granularity.value) || "month";
+    state.selectedGranularity = (v === "week" || v === "year" || v === "month") ? v : "month";
+    els.granularity.value = state.selectedGranularity;
+
+    els.granularity.addEventListener("change", () => {
+      const g = normStr(els.granularity.value) || "month";
+      state.selectedGranularity = (g === "week" || g === "year" || g === "month") ? g : "month";
+      state.computeToken++;
+      hideTooltip();
+      clearSelectionInGrist();
+      if (state.selectedProject) computeAndRender(state.selectedProject, state.selectedGranularity);
+      else renderModel({ project: "", keys: [], labels: [], counts: [], rowIdsByKey: new Map(), total: 0 }, state.selectedGranularity);
+    });
+  }
+
+  // Projet change
   els.dropdown.addEventListener("change", () => {
     const p = normStr(els.dropdown.value);
-    // Cancel current compute immediately and clear tooltip
     state.computeToken++;
     hideTooltip();
-    computeAndRender(p);
+    clearSelectionInGrist();
+    computeAndRender(p, state.selectedGranularity);
   });
 
   // Canvas interactions
@@ -572,13 +655,15 @@ function attachEvents() {
   els.canvas.addEventListener("click", async (e) => {
     const b = getBarAtClientPos(e.clientX, e.clientY);
     if (!b || b.count <= 0) return;
-    await selectMonthInGrist(b.key);
+    await selectBucketInGrist(b.key);
   });
 
   // Responsive
   window.addEventListener("resize", () => {
-    const model = state.cache.get(state.selectedProject);
-    if (model) drawBars(model.months, model.counts);
+    const project = state.selectedProject;
+    const gran = state.selectedGranularity;
+    const model = state.cache.get(cacheKey(project, gran));
+    if (model) drawBars(model.labels, model.counts, model.keys);
     else drawEmpty();
   });
 }

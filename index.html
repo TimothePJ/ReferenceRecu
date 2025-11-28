@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Références reçues par mois</title>
+  <title>Références reçues</title>
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <link rel="stylesheet" href="./css/style.css" />
@@ -16,6 +16,16 @@
         <label for="firstColumnDropdown">Projet</label>
         <select id="firstColumnDropdown">
           <option value="">Selectionner un projet</option>
+        </select>
+      </div>
+
+      <!-- ✅ Chronologie DOIT être en haut (pas dans le chart) -->
+      <div class="field">
+        <label for="granularityDropdown">Chronologie</label>
+        <select id="granularityDropdown">
+          <option value="week">Semaine</option>
+          <option value="month" selected>Mois</option>
+          <option value="year">Année</option>
         </select>
       </div>
 
@@ -36,6 +46,9 @@
           <div class="emptyState" id="emptyState">Sélectionne un projet</div>
           <div class="tooltip" id="tooltip" hidden></div>
         </div>
+
+        <!-- (optionnel) tu peux ajouter ici une zone "hint" ou une liste si tu veux -->
+        <!-- <div class="hint">Clique sur une barre pour sélectionner les lignes correspondantes.</div> -->
       </section>
     </main>
   </div>
